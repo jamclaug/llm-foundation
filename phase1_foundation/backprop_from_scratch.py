@@ -45,7 +45,10 @@ class Value:
             self.grad += local_deriv * out.grad
         out._backward = _backward
         return out
-
+    
+    def __neg__(self):
+        return self * -1
+    
     def __truediv__(self, other):
         return self * other**-1
 
