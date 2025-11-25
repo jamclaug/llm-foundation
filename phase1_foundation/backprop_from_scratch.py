@@ -124,7 +124,7 @@ print(nn.forward(X))
 # 3 inputs, 2 hidden layers and 2 outputs 
 
 input_size = 2
-hidden_size = 4
+hidden_size = 3
 output_size = 1
 h = 0.1
 epochs = 10000
