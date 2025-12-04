@@ -1,0 +1,21 @@
+# Local git config for llm-foundation repository
+# This overrides global settings for this repo only
+
+[user]
+    # Your personal GitHub account for commits
+    name = Your Name
+    email = your-personal-email@example.com
+
+# Note: Copilot authentication is handled separately through VS Code/GitHub CLI
+# and uses whichever GitHub account you're signed into in VS Code.
+# 
+# To use different accounts:
+# 1. Commits/pushes: Uses the [user] settings above (personal account)
+# 2. Copilot: Sign into your work account in VS Code's GitHub Copilot extension
+#
+# To apply this config to the repo, run:
+#   git config --local include.path ../.gitconfig
+#
+# Or copy these settings directly:
+#   git config --local user.name "Your Name"
+#   git config --local user.email "your-personal-email@example.com"

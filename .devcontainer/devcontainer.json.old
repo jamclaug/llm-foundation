@@ -1,0 +1,18 @@
+
+{
+  "image": "ghcr.io/pytorch/pytorch:2.2.2-cuda12.1-cudnn8-devel",
+  "runArgs": [
+    "--gpus",
+    "all",
+    "--ipc=host"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter"
+      ]
+    }
+  },
+  "postCreateCommand": "apt-get update && apt-get install -y git"
+}

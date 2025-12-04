@@ -1,0 +1,20 @@
+# Mamba experiments dependencies
+# Install with: pip install -r requirements.txt
+
+# Core dependencies (inherited from main repo)
+torch>=2.0.0
+numpy>=1.24.0
+transformers>=4.40.0  # For pretrained Mamba models from HuggingFace
+datasets>=2.12.0
+tokenizers>=0.13.0
+
+# Training utilities
+tqdm>=4.65.0
+# wandb>=0.15.0  # Optional: for experiment tracking
+
+# Development
+pytest>=7.3.0
+
+# NOTE: mamba-ssm is NOT required!
+# We use a pure PyTorch implementation that works on any platform.
+# For pretrained models, transformers handles everything.
