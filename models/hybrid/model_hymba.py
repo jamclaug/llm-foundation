@@ -608,8 +608,18 @@ class JambaLM(nn.Module):
 def get_hymba_config(preset: str = "30m") -> HymbaConfig:
     """Get preset configurations."""
     configs = {
-        # ~30M params - comparable to BDH baseline
+        # ~27M params - MATCHED to Mamba/Transformer for fair comparison
         "30m": HymbaConfig(
+            d_model=384,
+            n_layers=8,      # Matched: was 6, now 8
+            n_heads=6,
+            d_ff=1536,       # Matched: was 1024, now 1536 (4x d_model)
+            d_state=16,
+            expand=2,
+            learnable_mix=True,
+        ),
+        # Original 6-layer config (for reference)
+        "30m-v1": HymbaConfig(
             d_model=384,
             n_layers=6,
             n_heads=6,
@@ -623,7 +633,7 @@ def get_hymba_config(preset: str = "30m") -> HymbaConfig:
             d_model=768,
             n_layers=12,
             n_heads=12,
-            d_ff=2048,
+            d_ff=3072,       # 4x d_model
             d_state=16,
             expand=2,
             learnable_mix=True,
