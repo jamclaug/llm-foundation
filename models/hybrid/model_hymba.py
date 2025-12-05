@@ -17,6 +17,10 @@ Architecture per layer:
                                ↑                ↑
                           Local detail    Global summary
 
+Supports two SSM implementations:
+1. Pure PyTorch (educational, works everywhere)
+2. mamba-ssm CUDA kernels (10-50x faster, Linux/WSL only)
+
 Reference: "Hymba: A Hybrid-head Architecture for Small Language Models"
 """
 
@@ -32,6 +36,16 @@ import torch.nn.functional as F
 
 # Add shared folder to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "shared"))
+
+# Try to import mamba-ssm for CUDA-optimized kernels
+MAMBA_SSM_AVAILABLE = False
+try:
+    from mamba_ssm import Mamba
+    MAMBA_SSM_AVAILABLE = True
+    print("✓ mamba-ssm library loaded - Hymba will use CUDA-optimized SSM kernels")
+except ImportError:
+    print("⚠ mamba-ssm not installed - Hymba will use pure PyTorch SSM (slower)")
+    print("  For 10-50x speedup, install: pip install causal-conv1d mamba-ssm")
 
 
 @dataclass
@@ -51,6 +65,9 @@ class HymbaConfig:
     # Hybrid mixing
     attn_ratio: float = 0.5     # Portion of heads for attention (vs SSM)
     learnable_mix: bool = True  # Learn mixing weights vs fixed 50/50
+    
+    # Implementation
+    use_fast_ssm: bool = True   # Use mamba-ssm CUDA kernels if available
     
     # Training
     vocab_size: int = 50257
@@ -72,7 +89,7 @@ class HymbaConfig:
 
 
 # =============================================================================
-# SELECTIVE SSM (Mamba core)
+# SELECTIVE SSM (Mamba core) - Supports both Pure PyTorch and mamba-ssm
 # =============================================================================
 
 class SelectiveSSM(nn.Module):
@@ -81,14 +98,33 @@ class SelectiveSSM(nn.Module):
     
     Processes sequences with linear time complexity O(L) vs attention's O(L²).
     The "selective" part: B, C, Δ are input-dependent (not fixed).
+    
+    Supports two implementations:
+    - use_fast=True: Use mamba-ssm CUDA kernels (10-50x faster)
+    - use_fast=False: Pure PyTorch sequential scan (educational)
     """
     
-    def __init__(self, d_model: int, d_state: int = 16, d_conv: int = 4, expand: int = 2):
+    def __init__(self, d_model: int, d_state: int = 16, d_conv: int = 4, expand: int = 2, use_fast: bool = True):
         super().__init__()
         self.d_model = d_model
         self.d_state = d_state
         self.d_inner = d_model * expand
+        self.use_fast = use_fast and MAMBA_SSM_AVAILABLE
         
+        if self.use_fast:
+            # Use mamba-ssm's optimized Mamba module
+            self.mamba = Mamba(
+                d_model=d_model,
+                d_state=d_state,
+                d_conv=d_conv,
+                expand=expand,
+            )
+        else:
+            # Pure PyTorch implementation (slower but educational)
+            self._init_pytorch_ssm(d_model, d_state, d_conv, expand)
+    
+    def _init_pytorch_ssm(self, d_model, d_state, d_conv, expand):
+        """Initialize pure PyTorch SSM components."""
         # Input projection
         self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
         
@@ -122,6 +158,15 @@ class SelectiveSSM(nn.Module):
     
     def forward(self, x):
         """x: [batch, seq_len, d_model] -> [batch, seq_len, d_model]"""
+        if self.use_fast:
+            # Use mamba-ssm's optimized implementation
+            return self.mamba(x)
+        else:
+            # Pure PyTorch implementation
+            return self._forward_pytorch(x)
+    
+    def _forward_pytorch(self, x):
+        """Pure PyTorch SSM forward pass."""
         batch, seq_len, _ = x.shape
         
         # Project and split into SSM path and gate
@@ -248,7 +293,8 @@ class HymbaLayer(nn.Module):
             d_model=config.d_model,
             d_state=config.d_state,
             d_conv=config.d_conv,
-            expand=config.expand
+            expand=config.expand,
+            use_fast=config.use_fast_ssm,  # Use CUDA kernels if available
         )
         
         # Learnable mixing weights (or fixed 50/50)
@@ -338,7 +384,10 @@ class HymbaLM(nn.Module):
         
         # Initialize
         self.apply(self._init_weights)
-        print(f"HymbaLM: {self.num_params/1e6:.1f}M params")
+        
+        # Print model info
+        ssm_impl = "mamba-ssm (CUDA)" if (config.use_fast_ssm and MAMBA_SSM_AVAILABLE) else "PyTorch (slow)"
+        print(f"HymbaLM: {self.num_params/1e6:.1f}M params | SSM: {ssm_impl}")
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -458,7 +507,8 @@ class JambaLayer(nn.Module):
                 d_model=config.d_model,
                 d_state=config.d_state,
                 d_conv=config.d_conv,
-                expand=config.expand
+                expand=config.expand,
+                use_fast=config.use_fast_ssm,  # Use CUDA kernels if available
             )
         
         self.ffn = nn.Sequential(
@@ -506,7 +556,10 @@ class JambaLM(nn.Module):
         self.lm_head.weight = self.embedding.weight
         
         self.apply(self._init_weights)
-        print(f"JambaLM: {self.num_params/1e6:.1f}M params")
+        
+        # Print model info
+        ssm_impl = "mamba-ssm (CUDA)" if (config.use_fast_ssm and MAMBA_SSM_AVAILABLE) else "PyTorch (slow)"
+        print(f"JambaLM: {self.num_params/1e6:.1f}M params | SSM: {ssm_impl}")
         print(f"  Pattern: {['Attn' if i%2==0 else 'Mamba' for i in range(config.n_layers)]}")
     
     def _init_weights(self, module):

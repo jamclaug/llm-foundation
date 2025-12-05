@@ -15,6 +15,27 @@ tqdm>=4.65.0
 # Development
 pytest>=7.3.0
 
-# NOTE: mamba-ssm is NOT required!
-# We use a pure PyTorch implementation that works on any platform.
-# For pretrained models, transformers handles everything.
+# =============================================================================
+# OPTIMIZED MAMBA (Linux/WSL only - requires CUDA)
+# =============================================================================
+# These packages provide CUDA-optimized selective scan kernels for 10-50x speedup.
+# Install in order: causal-conv1d first, then mamba-ssm.
+#
+# pip install causal-conv1d>=1.4.0
+# pip install mamba-ssm>=2.0.0
+#
+# If pip install fails, install from source:
+#   pip install packaging ninja
+#   pip install causal-conv1d --no-build-isolation
+#   pip install mamba-ssm --no-build-isolation
+#
+# Requirements:
+#   - Linux or WSL (Windows not supported natively)
+#   - CUDA 11.6+ with matching PyTorch
+#   - GCC/G++ for compilation
+# =============================================================================
+causal-conv1d>=1.4.0  # Optimized causal conv1d for Mamba
+mamba-ssm>=2.0.0      # Official Mamba implementation with CUDA kernels
+
+# Optional: For Mamba2 with even faster kernels
+# triton>=2.1.0  # Used by Mamba2's SSD algorithm

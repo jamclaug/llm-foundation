@@ -47,13 +47,34 @@ def load_custom_model(checkpoint_path: str, device: torch.device):
         max_len=saved_config.get('max_len', 256),
     )
     
-    model = MambaLM(config)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Check if checkpoint was trained with mamba-ssm (FastMambaLM)
+    # by looking for 'layers.0.mamba.*' keys vs 'layers.0.ssm.*' keys
+    state_dict = checkpoint['model_state_dict']
+    uses_fast_mamba = any('layers.0.mamba.' in k for k in state_dict.keys())
+    
+    if uses_fast_mamba:
+        # Trained with mamba-ssm CUDA kernels
+        try:
+            from model_mamba_fast import FastMambaLM, MAMBA_SSM_AVAILABLE
+            if not MAMBA_SSM_AVAILABLE:
+                raise ImportError("mamba-ssm not available")
+            print("Checkpoint was trained with mamba-ssm, loading FastMambaLM...")
+            model = FastMambaLM(config)
+        except ImportError:
+            print("⚠ Checkpoint was trained with mamba-ssm but it's not installed.")
+            print("  Install with: pip install causal-conv1d mamba-ssm")
+            raise
+    else:
+        # Trained with pure PyTorch
+        print("Loading pure PyTorch MambaLM...")
+        model = MambaLM(config)
+    
+    model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
     
     print(f"Model loaded: {config.model_type}")
-    print(f"  Parameters: {model.num_parameters():,}")
+    print(f"  Parameters: {model.num_parameters() if hasattr(model, 'num_parameters') else model.num_params:,}")
     print(f"  Trained for: {checkpoint.get('step', 'unknown')} steps")
     print(f"  Best val loss: {checkpoint.get('best_val_loss', 'unknown')}")
     

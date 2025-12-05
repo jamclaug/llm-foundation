@@ -5,9 +5,19 @@ Training script for Mamba/Mamba2 language models.
 Trains Mamba (state space models) on TinyStories dataset for comparison
 with transformer-based architectures.
 
+Supports two implementations:
+1. Pure PyTorch (slower, educational, works everywhere)
+2. mamba-ssm CUDA kernels (10-50x faster, requires Linux/WSL)
+
 Usage:
+    # Pure PyTorch (slow but educational)
     python train.py --model_type mamba --max_steps 5000
-    python train.py --model_type mamba2 --max_steps 5000
+
+    # CUDA-optimized (fast training)
+    python train.py --model_type mamba --use_fast --max_steps 5000
+    
+    # Mamba2 with CUDA kernels
+    python train.py --model_type mamba2 --use_fast --max_steps 5000
 """
 
 import argparse
@@ -25,11 +35,10 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "shared"))
 
 from config import MambaConfig, Mamba130MConfig, Mamba30MConfig, Mamba2_130MConfig
-from model_mamba import MambaLM
 from dataset import TinyStoriesDataset
 
 
-def train_mamba(config: MambaConfig, resume_from: Optional[str] = None):
+def train_mamba(config: MambaConfig, resume_from: Optional[str] = None, use_fast: bool = False):
     """
     Training loop for Mamba models.
     
@@ -37,11 +46,17 @@ def train_mamba(config: MambaConfig, resume_from: Optional[str] = None):
     - Gradient accumulation for effective batch size
     - Learning rate warmup and cosine decay
     - Periodic validation and checkpointing
+    
+    Args:
+        config: MambaConfig with model and training parameters
+        resume_from: Path to checkpoint to resume from
+        use_fast: If True, use mamba-ssm CUDA kernels (10-50x faster)
     """
     print(f"\n{'='*70}")
     print(f"MAMBA LANGUAGE MODEL TRAINING")
     print(f"{'='*70}")
     print(f"Model type: {config.model_type}")
+    print(f"Implementation: {'mamba-ssm (CUDA)' if use_fast else 'Pure PyTorch'}")
     print(f"Hidden dim: {config.d_model}")
     print(f"Layers: {config.n_layers}")
     print(f"State dim: {config.d_state}")
@@ -61,15 +76,29 @@ def train_mamba(config: MambaConfig, resume_from: Optional[str] = None):
     tokenizer.pad_token = tokenizer.eos_token
     config.vocab_size = tokenizer.vocab_size
     
-    # Model
-    try:
-        model = MambaLM(config).to(device)
-    except ImportError as e:
-        print(f"\n❌ Error: {e}")
-        print("\nTo install mamba-ssm, run:")
-        print("  pip install mamba-ssm causal-conv1d")
-        print("\nNote: mamba-ssm requires Linux or WSL on Windows.")
-        return
+    # Model - choose implementation based on use_fast flag
+    if use_fast:
+        try:
+            from model_mamba_fast import FastMambaLM, MAMBA_SSM_AVAILABLE
+            if not MAMBA_SSM_AVAILABLE:
+                raise ImportError("mamba-ssm not available")
+            model = FastMambaLM(config).to(device)
+        except ImportError as e:
+            print(f"\n❌ Error: {e}")
+            print("\nTo install mamba-ssm for fast training, run:")
+            print("  pip install causal-conv1d>=1.4.0")
+            print("  pip install mamba-ssm>=2.0.0")
+            print("\nFalling back to pure PyTorch implementation...")
+            from model_mamba import MambaLM
+            model = MambaLM(config).to(device)
+    else:
+        try:
+            from model_mamba import MambaLM
+            model = MambaLM(config).to(device)
+        except ImportError as e:
+            print(f"\n❌ Error: {e}")
+            print("\nNote: mamba-ssm requires Linux or WSL on Windows.")
+            return
     
     n_params = model.num_parameters()
     print(f"Model parameters: {n_params:,} ({n_params/1e6:.1f}M)")
@@ -334,6 +363,8 @@ def main():
                        help="Model type: mamba or mamba2")
     parser.add_argument("--preset", choices=["30m", "130m", "custom"], default="30m",
                        help="Model size preset (30m matches BDH/SparseMoE size)")
+    parser.add_argument("--use_fast", action="store_true",
+                       help="Use mamba-ssm CUDA kernels for 10-50x speedup (requires Linux/WSL)")
     
     # Output
     parser.add_argument("--output_dir", type=str, default=None,
@@ -404,17 +435,19 @@ def main():
     if args.output_dir:
         config.output_dir = args.output_dir
     else:
-        config.output_dir = f"output/{args.model_type}_{args.preset}_{args.max_steps}steps"
+        impl_suffix = "_fast" if args.use_fast else "_pytorch"
+        config.output_dir = f"output/{args.model_type}_{args.preset}{impl_suffix}_{args.max_steps}steps"
     
     # Print config
     print("\nConfiguration:")
+    print(f"  Implementation: {'mamba-ssm (CUDA)' if args.use_fast else 'Pure PyTorch'}")
     for key, value in vars(config).items():
         if not key.startswith('_'):
             print(f"  {key}: {value}")
     print()
     
     # Train
-    train_mamba(config, resume_from=args.resume_from)
+    train_mamba(config, resume_from=args.resume_from, use_fast=args.use_fast)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Training script for Hymba hybrid Transformer-Mamba models.
+Training script for Standard Transformer language model.
 
-Supports:
-- HymbaLM: Parallel attention + SSM heads with learned mixing
-- JambaLM: Interleaved attention and SSM layers
+A baseline for comparing with:
+- Mamba (pure SSM)
+- Hymba (hybrid Attention+SSM)
+- Sparse MoE Transformer
 
 Usage:
-    python train.py --model hymba --max_steps 5000
-    python train.py --model jamba --max_steps 5000
+    python train.py --preset 30m --max_steps 5000
 """
 
 import argparse
@@ -26,33 +26,25 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "shared"))
 
 from dataset import TinyStoriesDataset
-from model_hymba import HymbaLM, JambaLM, HymbaConfig, get_hymba_config
+from model import TransformerLM, TransformerConfig, get_transformer_config
 
 
-def train_hymba(
-    model_type: str = "hymba",
+def train_transformer(
     preset: str = "30m",
     max_steps: int = 5000,
     batch_size: int = 4,
     grad_acc_steps: int = 8,
     lr: float = 3e-4,
-    eval_every: int = 50,
+    eval_every: int = 500,
     output_dir: str = None,
     resume_from: Optional[str] = None,
-    use_fast_ssm: bool = True,
 ):
-    """
-    Training loop for Hymba/Jamba hybrid models.
+    """Training loop for standard Transformer model."""
     
-    Args:
-        use_fast_ssm: If True, use mamba-ssm CUDA kernels for 10-50x speedup
-    """
     print(f"\n{'='*70}")
-    print(f"HYMBA HYBRID MODEL TRAINING")
+    print(f"STANDARD TRANSFORMER TRAINING")
     print(f"{'='*70}")
-    print(f"Model type: {model_type}")
     print(f"Preset: {preset}")
-    print(f"SSM implementation: {'mamba-ssm (CUDA)' if use_fast_ssm else 'Pure PyTorch'}")
     print(f"Max steps: {max_steps}")
     print(f"Effective batch size: {batch_size * grad_acc_steps}")
     print(f"{'='*70}\n")
@@ -66,18 +58,16 @@ def train_hymba(
         print(f"Available memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     
     # Config
-    config = get_hymba_config(preset)
-    config.use_fast_ssm = use_fast_ssm  # Enable/disable CUDA-optimized SSM
+    config = get_transformer_config(preset)
     
     # Output directory
     if output_dir is None:
-        impl_suffix = "_fast" if use_fast_ssm else "_pytorch"
-        output_dir = Path(__file__).parent.parent.parent / "output" / "hybrid" / f"{model_type}_{preset}{impl_suffix}_{max_steps//1000}k"
+        output_dir = Path(__file__).parent / "output" / f"transformer_{preset}_{max_steps}steps"
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output: {output_dir}")
     
-    # Auto-resume: check for latest checkpoint if no explicit resume given
+    # Auto-resume
     if resume_from is None:
         auto_resume_path = output_dir / "latest_checkpoint.pt"
         if auto_resume_path.exists():
@@ -87,16 +77,11 @@ def train_hymba(
     # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
+    config.vocab_size = tokenizer.vocab_size
     
     # Model
-    if model_type == "hymba":
-        model = HymbaLM(config).to(device)
-    elif model_type == "jamba":
-        model = JambaLM(config).to(device)
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
-    
-    n_params = model.num_params
+    model = TransformerLM(config).to(device)
+    n_params = model.num_parameters()
     print(f"Model parameters: {n_params:,} ({n_params/1e6:.1f}M)")
     
     # Datasets
@@ -176,8 +161,8 @@ def train_hymba(
             labels = batch['labels'].to(device)
             
             # Forward pass
-            loss, logits = model(input_ids, labels=labels)
-            loss = loss / grad_acc_steps
+            outputs = model(input_ids, labels=labels)
+            loss = outputs["loss"] / grad_acc_steps
             
             # Check for NaN
             if torch.isnan(loss) or torch.isinf(loss):
@@ -218,10 +203,9 @@ def train_hymba(
                 for val_batch in val_loader:
                     input_ids = val_batch['input_ids'].to(device)
                     labels = val_batch['labels'].to(device)
-                    loss, _ = model(input_ids, labels=labels)
-                    val_loss += loss.item()
+                    outputs = model(input_ids, labels=labels)
+                    val_loss += outputs["loss"].item()
                     val_batches += 1
-                    
                     if val_batches >= 100:
                         break
             
@@ -230,16 +214,9 @@ def train_hymba(
             print(f"\n{'='*70}")
             print(f"VALIDATION @ Step {step}")
             print(f"Val Loss: {val_loss:.4f}")
-            
-            # Print mixing stats for Hymba
-            if model_type == "hymba":
-                print(f"\nAttention vs SSM mixing (learned weights):")
-                for layer_name, stats in model.get_mixing_stats().items():
-                    print(f"  {layer_name}: attn_ratio={stats['attn_ratio_mean']:.3f}")
-            
             print(f"{'='*70}\n")
             
-            # Save checkpoint (overwrite single file to save disk space)
+            # Save checkpoint
             checkpoint = {
                 'step': step,
                 'model_state_dict': model.state_dict(),
@@ -247,11 +224,16 @@ def train_hymba(
                 'scheduler_state_dict': scheduler.state_dict(),
                 'val_loss': val_loss,
                 'best_val_loss': best_val_loss,
-                'config': config.__dict__,
-                'model_type': model_type,
+                'config': {
+                    'd_model': config.d_model,
+                    'n_layers': config.n_layers,
+                    'n_heads': config.n_heads,
+                    'd_ff': config.d_ff,
+                    'vocab_size': config.vocab_size,
+                    'max_len': config.max_len,
+                }
             }
             
-            # Always save latest checkpoint (overwrites previous)
             checkpoint_path = output_dir / "latest_checkpoint.pt"
             try:
                 torch.save(checkpoint, checkpoint_path)
@@ -271,11 +253,12 @@ def train_hymba(
             
             model.train()
     
-    # Final validation and generation
+    # Final summary
     print(f"\n{'='*70}")
     print("TRAINING COMPLETE")
     print(f"{'='*70}")
     print(f"Best Val Loss: {best_val_loss:.4f}")
+    print(f"Training time: {(time.time() - start_time)/3600:.2f} hours")
     
     # Generate sample text
     print(f"\nSample generation:")
@@ -293,10 +276,8 @@ def train_hymba(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Hymba hybrid model")
-    parser.add_argument("--model", type=str, default="hymba", choices=["hymba", "jamba"],
-                        help="Model type: hymba (parallel heads) or jamba (interleaved)")
-    parser.add_argument("--preset", type=str, default="30m", choices=["30m", "125m", "30m-fast"],
+    parser = argparse.ArgumentParser(description="Train standard Transformer")
+    parser.add_argument("--preset", type=str, default="30m", choices=["30m", "125m"],
                         help="Model size preset")
     parser.add_argument("--max_steps", type=int, default=5000,
                         help="Maximum training steps")
@@ -306,19 +287,16 @@ def main():
                         help="Gradient accumulation steps")
     parser.add_argument("--lr", type=float, default=3e-4,
                         help="Learning rate")
-    parser.add_argument("--eval_every", type=int, default=50,
+    parser.add_argument("--eval_every", type=int, default=500,
                         help="Validation frequency")
     parser.add_argument("--output_dir", type=str, default=None,
-                        help="Output directory for checkpoints")
+                        help="Output directory")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from checkpoint")
-    parser.add_argument("--no_fast", action="store_true",
-                        help="Disable mamba-ssm CUDA kernels (use pure PyTorch SSM)")
     
     args = parser.parse_args()
     
-    train_hymba(
-        model_type=args.model,
+    train_transformer(
         preset=args.preset,
         max_steps=args.max_steps,
         batch_size=args.batch_size,
@@ -327,7 +305,6 @@ def main():
         eval_every=args.eval_every,
         output_dir=args.output_dir,
         resume_from=args.resume,
-        use_fast_ssm=not args.no_fast,
     )
 
 

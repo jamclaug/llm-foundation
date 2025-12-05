@@ -6,8 +6,9 @@ Testing Mamba state space models for comparison with transformer architectures.
 
 Mamba is a state space model (SSM) that provides an efficient alternative to attention mechanisms for sequence modeling. This directory contains:
 
-1. **Pure PyTorch Mamba** - Educational implementation for training from scratch
-2. **Pretrained Mamba** - Load `state-spaces/mamba-130m` from HuggingFace (trained on The Pile)
+1. **Pure PyTorch Mamba** (`model_mamba.py`) - Educational implementation for understanding SSM math
+2. **CUDA-Optimized Mamba** (`model_mamba_fast.py`) - 10-50x faster using `mamba-ssm` library (Linux/WSL only)
+3. **Pretrained Mamba** - Load `state-spaces/mamba-130m` from HuggingFace (trained on The Pile)
 
 ## Goals
 
@@ -18,16 +19,38 @@ Mamba is a state space model (SSM) that provides an efficient alternative to att
 
 ## Quick Start
 
-### Option 1: Use Pretrained Model (Recommended for testing)
+### Option 1: Fast Training with mamba-ssm (Linux/WSL)
 
 ```bash
-cd mamba_experiments
+# Install optimized CUDA kernels
+pip install causal-conv1d>=1.4.0
+pip install mamba-ssm>=2.0.0
 
+# Train with CUDA-optimized implementation (10-50x faster)
+python train.py --model_type mamba --use_fast --max_steps 5000
+
+# Benchmark PyTorch vs mamba-ssm
+python model_mamba_fast.py --mode benchmark
+```
+
+### Option 2: Pure PyTorch (Educational, Any Platform)
+
+```bash
+# Train pure PyTorch Mamba (slower but educational)
+python train.py --model_type mamba --max_steps 5000
+
+# Generate from trained model
+python generate.py --checkpoint output/mamba_30m_pytorch_5000steps/best_checkpoint.pt
+```
+
+### Option 3: Use Pretrained Model (Recommended for testing)
+
+```bash
 # Test pretrained mamba-130m from HuggingFace
-python src/model_mamba.py --mode pretrained
+python model_mamba.py --mode pretrained
 
 # Generate text interactively
-python src/generate.py --pretrained state-spaces/mamba-130m --interactive
+python generate.py --pretrained state-spaces/mamba-130m --interactive
 ```
 
 Available pretrained models:
@@ -37,34 +60,22 @@ Available pretrained models:
 - `state-spaces/mamba-1.4b` (1.4B params)
 - `state-spaces/mamba-2.8b` (2.8B params)
 
-### Option 2: Train from Scratch
-
-```bash
-# Train pure PyTorch Mamba on TinyStories
-python src/train.py --model_type mamba --max_steps 5000
-
-# Generate from trained model
-python src/generate.py --checkpoint output/mamba_130m_5000steps/best_checkpoint.pt
-```
-
 ## Structure
 
 ```
-mamba_experiments/
-├── src/
-│   ├── config.py          # Model configurations
-│   ├── model_mamba.py     # Pure PyTorch Mamba + HuggingFace loader
-│   ├── train.py           # Training script
-│   └── generate.py        # Text generation
+models/mamba/
+├── model_mamba.py       # Pure PyTorch Mamba (educational)
+├── model_mamba_fast.py  # CUDA-optimized using mamba-ssm
+├── train.py             # Training script (supports both implementations)
+├── generate.py          # Text generation
+├── requirements.txt     # Dependencies (including mamba-ssm)
 ├── tests/
-├── output/                # Checkpoints
-├── notebooks/
 └── README.md
 ```
 
 ## Implementation Details
 
-### Pure PyTorch Mamba
+### Pure PyTorch Mamba (`model_mamba.py`)
 
 The `MambaLM` class implements the full Mamba architecture without external dependencies:
 
@@ -77,14 +88,29 @@ Key difference from transformers: **No attention mechanism**. Instead uses:
 - State space recurrence: `h[k] = Ā·h[k-1] + B̄·x[k]`
 - Input-dependent discretization (Δ, B, C computed from input)
 
+### CUDA-Optimized Mamba (`model_mamba_fast.py`)
+
+The `FastMambaLM` class wraps the official `mamba-ssm` library:
+
+- **Parallel selective scan**: CUDA kernels instead of Python loop
+- **Fused operations**: Minimize memory bandwidth
+- **10-50x speedup**: Essential for serious training
+
+```python
+# Use factory function to auto-select best implementation
+from models.mamba import create_mamba_model
+
+model = create_mamba_model(config)  # Uses mamba-ssm if available
+```
+
 ### Trade-offs
 
-| Aspect | Pure PyTorch | Pretrained (HuggingFace) |
-|--------|--------------|--------------------------|
-| Speed | Slower (sequential scan) | Faster (optimized kernels) |
-| Platform | Any (Windows/Mac/Linux) | Any |
-| Learning | Great for understanding | Black box |
-| Training | From scratch | Already trained on The Pile |
+| Aspect | Pure PyTorch | mamba-ssm (CUDA) | Pretrained (HuggingFace) |
+|--------|--------------|------------------|--------------------------|
+| Speed | Slow (sequential) | **10-50x faster** | Fast |
+| Platform | Any | Linux/WSL only | Any |
+| Learning | Great for understanding | Production-ready | Black box |
+| Training | From scratch | From scratch | Already trained |
 
 ## Expected Performance
 
