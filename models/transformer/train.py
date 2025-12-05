@@ -2,310 +2,148 @@
 """
 Training script for Standard Transformer language model.
 
+Uses the shared Trainer module for:
+- Mixed precision training (fp16/bf16) - ~2x speedup
+- torch.compile support - ~30% speedup  
+- Gradient checkpointing - enables longer sequences
+- Early stopping, W&B logging, auto-checkpointing
+
 A baseline for comparing with:
 - Mamba (pure SSM)
 - Hymba (hybrid Attention+SSM)
 - Sparse MoE Transformer
 
 Usage:
+    # Basic training on TinyStories
     python train.py --preset 30m --max_steps 5000
+
+    # Long-sequence training on PG-19 (tests O(L²) attention scaling)
+    python train.py --dataset pg19 --max_steps 5000
+    
+    # With all optimizations
+    python train.py --dataset wikitext --mixed_precision fp16 --compile
 """
 
 import argparse
-import os
 import sys
-import time
 from pathlib import Path
-from typing import Optional
 
 import torch
-from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
+from transformers import AutoTokenizer
 
 # Add shared folder to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "shared"))
 
-from dataset import TinyStoriesDataset
-from model import TransformerLM, TransformerConfig, get_transformer_config
-
-
-def train_transformer(
-    preset: str = "30m",
-    max_steps: int = 5000,
-    batch_size: int = 4,
-    grad_acc_steps: int = 8,
-    lr: float = 3e-4,
-    eval_every: int = 500,
-    output_dir: str = None,
-    resume_from: Optional[str] = None,
-):
-    """Training loop for standard Transformer model."""
-    
-    print(f"\n{'='*70}")
-    print(f"STANDARD TRANSFORMER TRAINING")
-    print(f"{'='*70}")
-    print(f"Preset: {preset}")
-    print(f"Max steps: {max_steps}")
-    print(f"Effective batch size: {batch_size * grad_acc_steps}")
-    print(f"{'='*70}\n")
-    
-    # Setup
-    torch.manual_seed(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"Available memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    
-    # Config
-    config = get_transformer_config(preset)
-    
-    # Output directory
-    if output_dir is None:
-        output_dir = Path(__file__).parent / "output" / f"transformer_{preset}_{max_steps}steps"
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Output: {output_dir}")
-    
-    # Auto-resume
-    if resume_from is None:
-        auto_resume_path = output_dir / "latest_checkpoint.pt"
-        if auto_resume_path.exists():
-            resume_from = str(auto_resume_path)
-            print(f"Found existing checkpoint, will auto-resume from: {resume_from}")
-    
-    # Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    tokenizer.pad_token = tokenizer.eos_token
-    config.vocab_size = tokenizer.vocab_size
-    
-    # Model
-    model = TransformerLM(config).to(device)
-    n_params = model.num_parameters()
-    print(f"Model parameters: {n_params:,} ({n_params/1e6:.1f}M)")
-    
-    # Datasets
-    print("\nLoading datasets...")
-    train_dataset = TinyStoriesDataset(tokenizer, max_len=config.max_len, split="train")
-    val_dataset = TinyStoriesDataset(tokenizer, max_len=config.max_len, split="validation")
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=torch.cuda.is_available()
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=torch.cuda.is_available()
-    )
-    
-    # Optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=lr,
-        weight_decay=0.01,
-        betas=(0.9, 0.999)
-    )
-    
-    # Scheduler
-    warmup_steps = max_steps // 10
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=max_steps
-    )
-    
-    # Resume from checkpoint
-    start_step = 0
-    best_val_loss = float('inf')
-    if resume_from and os.path.exists(resume_from):
-        print(f"\nLoading checkpoint: {resume_from}")
-        checkpoint = torch.load(resume_from, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_step = checkpoint.get('step', 0)
-        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        print(f"Resumed from step {start_step}")
-    
-    # Training loop
-    model.train()
-    step = start_step
-    train_iter = iter(train_loader)
-    
-    print(f"\nStarting training from step {start_step} to {max_steps}")
-    print(f"Validation every {eval_every} steps\n")
-    
-    start_time = time.time()
-    accumulated_loss = 0
-    
-    while step < max_steps:
-        optimizer.zero_grad()
-        batch_loss = 0
-        
-        for micro_step in range(grad_acc_steps):
-            try:
-                batch = next(train_iter)
-            except StopIteration:
-                train_iter = iter(train_loader)
-                batch = next(train_iter)
-            
-            input_ids = batch['input_ids'].to(device)
-            labels = batch['labels'].to(device)
-            
-            # Forward pass
-            outputs = model(input_ids, labels=labels)
-            loss = outputs["loss"] / grad_acc_steps
-            
-            # Check for NaN
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"\n⚠️  Warning: NaN/Inf loss at step {step}, skipping batch")
-                continue
-            
-            loss.backward()
-            batch_loss += loss.item() * grad_acc_steps
-        
-        # Optimizer step
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        scheduler.step()
-        
-        accumulated_loss += batch_loss
-        step += 1
-        
-        # Logging
-        if step % 10 == 0:
-            elapsed = time.time() - start_time
-            steps_per_sec = (step - start_step) / elapsed if elapsed > 0 else 0
-            eta_seconds = (max_steps - step) / steps_per_sec if steps_per_sec > 0 else 0
-            eta_hours = eta_seconds / 3600
-            avg_loss = accumulated_loss / 10
-            accumulated_loss = 0
-            
-            current_lr = scheduler.get_last_lr()[0]
-            print(f"Step {step}/{max_steps} | Loss: {avg_loss:.4f} | "
-                  f"LR: {current_lr:.2e} | Speed: {steps_per_sec:.2f} steps/s | ETA: {eta_hours:.1f}h")
-        
-        # Validation
-        if step % eval_every == 0:
-            model.eval()
-            val_loss = 0
-            val_batches = 0
-            
-            with torch.no_grad():
-                for val_batch in val_loader:
-                    input_ids = val_batch['input_ids'].to(device)
-                    labels = val_batch['labels'].to(device)
-                    outputs = model(input_ids, labels=labels)
-                    val_loss += outputs["loss"].item()
-                    val_batches += 1
-                    if val_batches >= 100:
-                        break
-            
-            val_loss /= val_batches
-            
-            print(f"\n{'='*70}")
-            print(f"VALIDATION @ Step {step}")
-            print(f"Val Loss: {val_loss:.4f}")
-            print(f"{'='*70}\n")
-            
-            # Save checkpoint
-            checkpoint = {
-                'step': step,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'val_loss': val_loss,
-                'best_val_loss': best_val_loss,
-                'config': {
-                    'd_model': config.d_model,
-                    'n_layers': config.n_layers,
-                    'n_heads': config.n_heads,
-                    'd_ff': config.d_ff,
-                    'vocab_size': config.vocab_size,
-                    'max_len': config.max_len,
-                }
-            }
-            
-            checkpoint_path = output_dir / "latest_checkpoint.pt"
-            try:
-                torch.save(checkpoint, checkpoint_path)
-                print(f"Saved checkpoint: {checkpoint_path}")
-            except Exception as e:
-                print(f"⚠️  Warning: Failed to save checkpoint: {e}")
-            
-            # Save best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_path = output_dir / "best_checkpoint.pt"
-                try:
-                    torch.save(checkpoint, best_path)
-                    print(f"✓ New best model! Val loss: {val_loss:.4f}")
-                except Exception as e:
-                    print(f"⚠️  Warning: Failed to save best checkpoint: {e}")
-            
-            model.train()
-    
-    # Final summary
-    print(f"\n{'='*70}")
-    print("TRAINING COMPLETE")
-    print(f"{'='*70}")
-    print(f"Best Val Loss: {best_val_loss:.4f}")
-    print(f"Training time: {(time.time() - start_time)/3600:.2f} hours")
-    
-    # Generate sample text
-    print(f"\nSample generation:")
-    model.eval()
-    
-    prompts = ["Once upon a time", "The little dog"]
-    for prompt in prompts:
-        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-        output = model.generate(input_ids, max_new_tokens=100, temperature=0.8, top_k=50)
-        text = tokenizer.decode(output[0], skip_special_tokens=True)
-        print(f"\nPrompt: '{prompt}'")
-        print(f"Output: {text[:300]}...")
-    
-    return best_val_loss
+from trainer import create_trainer
+from dataset import get_dataset
+from model import TransformerLM, get_transformer_config
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train standard Transformer")
-    parser.add_argument("--preset", type=str, default="30m", choices=["30m", "125m"],
+    
+    # Model
+    parser.add_argument("--preset", type=str, default="30m",
+                        choices=["30m", "125m"],
                         help="Model size preset")
-    parser.add_argument("--max_steps", type=int, default=5000,
-                        help="Maximum training steps")
-    parser.add_argument("--batch_size", type=int, default=4,
-                        help="Batch size per device")
-    parser.add_argument("--grad_acc_steps", type=int, default=8,
-                        help="Gradient accumulation steps")
-    parser.add_argument("--lr", type=float, default=3e-4,
-                        help="Learning rate")
-    parser.add_argument("--eval_every", type=int, default=500,
-                        help="Validation frequency")
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="Output directory")
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Resume from checkpoint")
+    
+    # Dataset
+    parser.add_argument("--dataset", type=str, default="tinystories",
+                        choices=["tinystories", "wikitext", "pg19"],
+                        help="Dataset to train on")
+    parser.add_argument("--max_len", type=int, default=None,
+                        help="Max sequence length (default: auto based on dataset)")
+    
+    # Training
+    parser.add_argument("--max_steps", type=int, default=5000)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--grad_acc_steps", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--eval_every", type=int, default=500)
+    parser.add_argument("--warmup_steps", type=int, default=500)
+    
+    # Performance optimizations
+    parser.add_argument("--mixed_precision", type=str, default="fp16",
+                        choices=["fp16", "bf16", "none"],
+                        help="Mixed precision mode (fp16 gives ~2x speedup)")
+    parser.add_argument("--compile", action="store_true",
+                        help="Use torch.compile (PyTorch 2.0+, ~30%% speedup)")
+    parser.add_argument("--gradient_checkpointing", action="store_true",
+                        help="Trade compute for memory (enables longer sequences)")
+    
+    # Logging & output
+    parser.add_argument("--wandb", action="store_true",
+                        help="Enable W&B logging")
+    parser.add_argument("--early_stopping", action="store_true",
+                        help="Stop if validation loss stops improving")
+    parser.add_argument("--output_dir", type=str, default=None)
     
     args = parser.parse_args()
     
-    train_transformer(
-        preset=args.preset,
+    # Determine max_len based on dataset
+    if args.max_len is None:
+        max_len_defaults = {"tinystories": 256, "wikitext": 1024, "pg19": 2048}
+        args.max_len = max_len_defaults[args.dataset]
+    
+    print(f"\n{'='*70}")
+    print("STANDARD TRANSFORMER TRAINING")
+    print(f"{'='*70}")
+    print(f"Model: Transformer ({args.preset})")
+    print(f"Dataset: {args.dataset} (max_len={args.max_len})")
+    print(f"Mixed precision: {args.mixed_precision}")
+    print(f"{'='*70}\n")
+    
+    # Tokenizer
+    print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer.pad_token = tokenizer.eos_token
+    
+    # Config
+    config = get_transformer_config(args.preset)
+    config.max_len = args.max_len
+    config.vocab_size = tokenizer.vocab_size
+    
+    # Model
+    print("Loading model...")
+    model = TransformerLM(config)
+    print(f"Model parameters: {model.num_parameters():,}")
+    
+    # Datasets
+    print(f"\nLoading {args.dataset} dataset...")
+    train_dataset = get_dataset(args.dataset, tokenizer, split="train", max_len=args.max_len)
+    val_dataset = get_dataset(args.dataset, tokenizer, split="validation", max_len=args.max_len)
+    
+    # Output directory
+    if args.output_dir is None:
+        ds = f"_{args.dataset}" if args.dataset != "tinystories" else ""
+        args.output_dir = f"output/transformer_{args.preset}{ds}_{args.max_steps}steps"
+    
+    # Create trainer using shared module
+    trainer = create_trainer(
+        model=model,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        tokenizer=tokenizer,
+        output_dir=args.output_dir,
         max_steps=args.max_steps,
         batch_size=args.batch_size,
-        grad_acc_steps=args.grad_acc_steps,
-        lr=args.lr,
+        grad_accumulation_steps=args.grad_acc_steps,
+        learning_rate=args.lr,
+        warmup_steps=args.warmup_steps,
         eval_every=args.eval_every,
-        output_dir=args.output_dir,
-        resume_from=args.resume,
+        mixed_precision=args.mixed_precision,
+        compile_model=args.compile,
+        gradient_checkpointing=args.gradient_checkpointing,
+        early_stopping=args.early_stopping,
+        log_wandb=args.wandb,
     )
+    
+    # Train!
+    best_val_loss = trainer.train()
+    
+    print(f"\n✅ Training complete!")
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Checkpoint saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":

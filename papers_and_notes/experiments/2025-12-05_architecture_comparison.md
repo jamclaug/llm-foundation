@@ -81,13 +81,58 @@ d_model=384, n_layers=8, n_heads=6, d_ff=1536, d_state=16
 
 ## Future Experiments
 
-1. **Longer sequences** (1K-4K tokens with PG-19 or WikiText)
-   - Hypothesis: Mamba will outperform on throughput
-   - Hypothesis: Hymba mixing will shift toward more SSM
+### Round 3: Long-Sequence Comparison (Planned)
 
-2. **Scaling** (125M+ params)
+This is where Mamba should shine. At longer sequences:
+- **Transformer**: O(L²) attention becomes bottleneck (memory & compute)
+- **Mamba**: O(L) linear scaling, constant memory per token
+- **Hymba**: Hybrid - will learned mixing adapt to favor SSM?
+
+**Datasets Added:**
+```bash
+# Medium-length (1024 tokens) - tests attention scaling
+python train.py --dataset wikitext --max_len 1024
+
+# Long-range (2048 tokens) - where Mamba should dominate
+python train.py --dataset pg19 --max_len 2048
+```
+
+**Expected Observations:**
+1. GPU memory will grow ~16x for Transformer (256→1024) but ~4x for Mamba
+2. Mamba throughput should stay constant, Transformer will slow dramatically
+3. If Hymba is smart, its learned mixing should shift toward SSM at longer sequences
+
+**Hardware Constraints (Quadro T1000 4GB):**
+- 1024 tokens: May need batch_size=2
+- 2048 tokens: May need batch_size=1 + gradient accumulation
+- Consider using gradient checkpointing if OOM
+
+### Round 4: Scaling (Future)
+
+1. **125M+ parameters**
    - Do architectural differences grow or shrink?
 
-3. **Task-specific evaluation**
-   - Long-range retrieval tasks
+2. **Task-specific evaluation**
+   - Long-range retrieval tasks (copy, associative recall)
    - Multi-turn dialogue
+
+### Future Improvement: RoPE
+
+Current limitation: learned positional embeddings are fixed to max_len.
+Training on 256 tokens means model can't handle longer sequences at inference.
+
+**RoPE (Rotary Position Embeddings):**
+- Encodes position via rotation matrix applied to Q and K
+- No learned position embedding table
+- Scales to arbitrary lengths without retraining
+- Used by: LLaMA, Mistral, Qwen, most modern LLMs
+
+**Implementation:** Apply rotation to each attention head:
+```python
+# RoPE pseudocode
+cos_m, sin_m = get_rotary_embeddings(position_indices)
+q = apply_rotary(q, cos_m, sin_m)
+k = apply_rotary(k, cos_m, sin_m)
+```
+
+Will implement in Phase 2 if long-sequence experiments show promise.
