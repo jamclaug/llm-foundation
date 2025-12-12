@@ -34,18 +34,49 @@ def load_custom_model(checkpoint_path: str, device: torch.device):
     print(f"Loading checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Reconstruct config from checkpoint
+    # Infer config from checkpoint tensor shapes (more reliable than saved config)
+    state_dict = checkpoint['model_state_dict']
+    
+    # Infer dimensions from tensor shapes
+    vocab_size, d_model = state_dict['embedding.weight'].shape
+    n_layers = sum(1 for k in state_dict if k.startswith('layers.') and '.norm.weight' in k)
+    
+    # Infer d_state from A_log shape: [d_inner, d_state] where d_inner = d_model * expand
+    # Try both mamba-ssm and pure PyTorch key names
+    if 'layers.0.mamba.A_log' in state_dict:
+        d_inner, d_state = state_dict['layers.0.mamba.A_log'].shape
+    elif 'layers.0.ssm.A_log' in state_dict:
+        d_inner, d_state = state_dict['layers.0.ssm.A_log'].shape
+    else:
+        d_state = 16  # fallback
+        d_inner = d_model * 2
+    
+    expand = d_inner // d_model
+    
+    # Infer d_conv from conv1d weight shape: [d_inner, 1, d_conv]
+    if 'layers.0.mamba.conv1d.weight' in state_dict:
+        d_conv = state_dict['layers.0.mamba.conv1d.weight'].shape[2]
+    elif 'layers.0.ssm.conv1d.weight' in state_dict:
+        d_conv = state_dict['layers.0.ssm.conv1d.weight'].shape[2]
+    else:
+        d_conv = 4  # fallback
+    
+    # Get max_len from saved config if available, else default
     saved_config = checkpoint.get('config', {})
+    max_len = saved_config.get('max_len', 1024)
+    
     config = MambaConfig(
-        model_type=saved_config.get('model_type', 'mamba'),
-        d_model=saved_config.get('d_model', 768),
-        n_layers=saved_config.get('n_layers', 24),
-        d_state=saved_config.get('d_state', 16),
-        d_conv=saved_config.get('d_conv', 4),
-        expand=saved_config.get('expand', 2),
-        vocab_size=saved_config.get('vocab_size', 50257),
-        max_len=saved_config.get('max_len', 256),
+        model_type='mamba',
+        d_model=d_model,
+        n_layers=n_layers,
+        d_state=d_state,
+        d_conv=d_conv,
+        expand=expand,
+        vocab_size=vocab_size,
+        max_len=max_len,
     )
+    
+    print(f"Inferred config: d_model={d_model}, n_layers={n_layers}, d_state={d_state}, expand={expand}")
     
     # Check if checkpoint was trained with mamba-ssm (FastMambaLM)
     # by looking for 'layers.0.mamba.*' keys vs 'layers.0.ssm.*' keys

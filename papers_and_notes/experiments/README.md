@@ -8,27 +8,41 @@ This folder contains detailed experiment logs and results for the Meta-Architect
 |------|------------|--------|------|
 | 2025-12-03 | Hebbian Learning in Transformers | ❌ Failed | [2025-12-03_hebbian_learning.md](2025-12-03_hebbian_learning.md) |
 | 2025-12-05 | Architecture Comparison (Round 1) | ✅ Mamba≈Transformer | [2025-12-05_architecture_comparison.md](2025-12-05_architecture_comparison.md) |
+| 2025-12-07 | Mamba WikiText-103 (1024 tokens) | ✅ Complete | See below |
 
 ## In Progress
 
 | Experiment | Status | Notes |
 |------------|--------|-------|
-| Hymba v2 (8 layers) | 🔄 Training | Fair comparison with matched layer count |
+| Transformer WikiText-103 | 🔄 Training | O(L²) comparison at 1024 tokens |
+| Hymba WikiText-103 | 📋 Queued | Test mixing weight differentiation |
 
 ## Key Results So Far
 
-| Model | Val Loss | Params | Notes |
-|-------|----------|--------|-------|
-| Mamba | **1.25** | 27M | Pure SSM, 8 layers |
-| Transformer | **1.26** | 27M | Pure Attention, 8 layers |
-| Hymba v1 | 1.90 | 30M | Unfair: only 6 layers |
+### Round 1: TinyStories (256 tokens)
+| Model | Val Loss | Params | Speed | Notes |
+|-------|----------|--------|-------|-------|
+| Mamba | **1.25** | 27M | - | Pure SSM, 8 layers |
+| Transformer | **1.26** | 27M | - | Pure Attention, 8 layers |
+| Hymba v2 | 1.88 | ~30M | - | Static 62% attention all layers |
+
+### Round 2: WikiText-103 (1024 tokens)
+| Model | Val Loss | Params | Speed | Training Time | Notes |
+|-------|----------|--------|-------|---------------|-------|
+| Mamba | **0.508** | 27M | 0.05 steps/s | 27.86h | ✅ Complete |
+| Transformer | ? | 159M | 0.02 steps/s | ~77h ETA | 🔄 In progress |
+| Hymba | ? | ~30M | ? | ? | 📋 Queued |
+
+**Key Observations:**
+- Transformer is **2.5x slower** than Mamba at 1024 tokens (0.02 vs 0.05 steps/s)
+- This is O(L²) vs O(L) showing up! At 256 tokens they were similar speed.
+- Transformer has 159M params (Sparse MoE) vs Mamba's 27M
 
 ## Planned Experiments
 
 | Experiment | Status | Notes |
 |------------|--------|-------|
-| Hymba v2 (fair comparison) | 🔄 Next | 8 layers, matched FFN |
-| Long sequence comparison | 📋 Planned | PG-19 or WikiText, 1K-4K tokens |
+| Hymba WikiText (1024 tokens) | 📋 Next | Test if mixing weights differentiate on long sequences |
 | Sparse MoE vs Dense | 📋 Planned | Same param count |
 
 ## Experiment Template

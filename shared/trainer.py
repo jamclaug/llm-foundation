@@ -71,7 +71,7 @@ class TrainerConfig:
     
     # Performance optimizations
     mixed_precision: str = "fp16"  # "fp16", "bf16", or "none"
-    compile_model: bool = False  # torch.compile (PyTorch 2.0+)
+    compile_model: bool = True  # torch.compile (PyTorch 2.0+)
     gradient_checkpointing: bool = False  # Trade compute for memory
     num_workers: int = 0  # DataLoader workers (0 for Windows compatibility)
     
@@ -315,7 +315,7 @@ class Trainer:
         if config.mixed_precision != "none" and torch.cuda.is_available():
             if config.mixed_precision == "fp16":
                 self.autocast_dtype = torch.float16
-                self.scaler = GradScaler()
+                self.scaler = torch.amp.GradScaler('cuda')
                 print("✓ Mixed precision: fp16")
             elif config.mixed_precision == "bf16":
                 if torch.cuda.is_bf16_supported():
@@ -356,7 +356,7 @@ class Trainer:
     def _get_autocast_context(self):
         """Get the appropriate autocast context for mixed precision."""
         if self.autocast_dtype is not None:
-            return autocast(dtype=self.autocast_dtype)
+            return torch.amp.autocast('cuda', dtype=self.autocast_dtype)
         return nullcontext()
     
     def _train_step(self, batch: Dict[str, torch.Tensor]) -> float:
